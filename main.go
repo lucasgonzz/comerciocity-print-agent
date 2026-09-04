@@ -247,18 +247,37 @@ func instalar() {
 
 // sondear es el bucle de trabajo: pregunta por tickets, los imprime, informa como salieron.
 func sondear(config *Config) {
+	/*
+	 * 🔴 La presencia se mantiene en su PROPIA goroutine, separada del bucle de impresion.
+	 *
+	 * El sistema considera desconectado a un equipo que no da señales por 30 segundos, y ahi
+	 * empieza a rechazar con 409 todo lo que quieran imprimir en el. Si la presencia dependiera
+	 * del bucle, una sola comandera trabada la congelaria: el timeout de impresion solo ya son 45
+	 * segundos, y con los reintentos del reporte pasa los dos minutos. Durante todo ese rato, las
+	 * OTRAS cajas que imprimen en este equipo perderian sus tickets por una impresora que no es
+	 * la de ellas.
+	 */
+	terminar := make(chan struct{})
+
+	go mantenerPresencia(config, terminar)
+
 	ultimoTrabajo := time.Now()
-	ultimoHeartbeat := time.Time{}
 	erroresSeguidos := 0
 
 	for {
+		select {
+		case <-terminar:
+			return
+		default:
+		}
+
 		/*
 		 * Un panic mata el proceso entero, y con la consola escondida el stack trace va a un
 		 * stderr que nadie mira: la caja simplemente deja de imprimir hasta que alguien reinicie
 		 * Windows. El recover envuelve UNA vuelta del bucle, asi que un error puntual en una
 		 * impresion no se lleva puesto al agente.
 		 */
-		termina := unaVueltaDelBucle(config, &ultimoTrabajo, &ultimoHeartbeat, &erroresSeguidos)
+		termina := unaVueltaDelBucle(config, &ultimoTrabajo, &erroresSeguidos)
 
 		if termina {
 			return
@@ -267,36 +286,13 @@ func sondear(config *Config) {
 }
 
 // unaVueltaDelBucle hace un ciclo completo y devuelve true si el agente tiene que terminar.
-func unaVueltaDelBucle(config *Config, ultimoTrabajo *time.Time, ultimoHeartbeat *time.Time, erroresSeguidos *int) (termina bool) {
+func unaVueltaDelBucle(config *Config, ultimoTrabajo *time.Time, erroresSeguidos *int) (termina bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			Log("PANIC recuperado en el bucle: %v", r)
 			time.Sleep(5 * time.Second)
 		}
 	}()
-
-	// El heartbeat va antes que el sondeo para que el equipo aparezca en linea en el sistema
-	// desde el primer segundo, sin esperar a que alguien mande un ticket.
-	if time.Since(*ultimoHeartbeat) >= intervaloDeHeartbeat {
-		impresoras, err := ListarImpresoras()
-
-		if err == nil {
-			errHeartbeat := enviarHeartbeat(config, impresoras)
-
-			if errHeartbeat == ErrNoAutorizado {
-				desvincularse(config)
-				return true
-			}
-
-			/*
-			 * 🔴 El reloj se adelanta pase lo que pase. Si solo se moviera cuando el POST sale
-			 * bien, con el servidor caido la condicion seguiria siendo verdadera en cada vuelta:
-			 * el agente pasaria de 1 heartbeat por minuto a 1 cada 2 segundos, golpeando mas
-			 * fuerte justo cuando el hosting esta en problemas.
-			 */
-			*ultimoHeartbeat = time.Now()
-		}
-	}
 
 	jobs, err := pedirTrabajos(config)
 
@@ -432,4 +428,36 @@ func esperarEnter() {
 	fmt.Print("  Apreta Enter para continuar...")
 	bufio.NewReader(os.Stdin).ReadString('\n')
 	fmt.Println()
+}
+
+// mantenerPresencia avisa cada tanto que el equipo sigue vivo, pase lo que pase con la impresion.
+//
+// Corre en su propia goroutine justamente para que una comandera trabada no lo frene: es lo unico
+// que decide si el sistema deja que las demas cajas manden tickets a este equipo.
+func mantenerPresencia(config *Config, terminar chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			Log("PANIC recuperado en el heartbeat: %v", r)
+		}
+	}()
+
+	for {
+		select {
+		case <-terminar:
+			return
+		default:
+		}
+
+		impresoras, err := ListarImpresoras()
+
+		if err == nil {
+			if enviarHeartbeat(config, impresoras) == ErrNoAutorizado {
+				desvincularse(config)
+				close(terminar)
+				return
+			}
+		}
+
+		time.Sleep(intervaloDeHeartbeat)
+	}
 }
