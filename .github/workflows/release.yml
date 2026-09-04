@@ -1,0 +1,36 @@
+name: release
+
+# Compila el agente y lo publica cuando se pushea un tag vX.Y.Z.
+#
+# El link que usa el sistema para la descarga es siempre el mismo:
+# https://github.com/lucasgonzz/comerciocity-print-agent/releases/latest/download/ComercioCityPrint.exe
+# Apunta solo al ultimo release, asi que publicar una version nueva no obliga a tocar el SPA.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      # Se compila para Windows desde Linux: los archivos _windows.go entran por GOOS y el
+      # ejecutable no necesita nada instalado en la maquina del comercio.
+      - name: Compilar
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ComercioCityPrint.exe .
+
+      - name: Publicar el release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ComercioCityPrint.exe
+          generate_release_notes: true
