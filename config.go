@@ -89,3 +89,20 @@ func guardarConfig(config *Config) error {
 
 	return os.WriteFile(ruta, contenido, 0600)
 }
+
+// borrarConfig saca la configuracion del equipo.
+//
+// Se usa cuando el servidor contesta 401: el equipo fue desvinculado desde el sistema y el token no
+// vale mas. Dejarla ahi haria que el agente reintentara con un token muerto en cada arranque.
+func borrarConfig() error {
+	ruta, err := rutaDeConfig()
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(ruta); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
+}

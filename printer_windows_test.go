@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestListarImpresoras verifica contra el Windows real que la llamada a EnumPrintersW este bien
 // armada: los tamaños de struct y el recorrido del buffer son justo donde un error de syscall no
@@ -9,6 +12,12 @@ func TestListarImpresoras(t *testing.T) {
 	impresoras, err := ListarImpresoras()
 	if err != nil {
 		t.Fatalf("ListarImpresoras devolvio error: %v", err)
+	}
+
+	// Sin impresoras el test no verifica nada: se saltea explicitamente en vez de pasar en
+	// vacio y dar un verde que no significa nada.
+	if len(impresoras) == 0 {
+		t.Skip("esta maquina no tiene impresoras instaladas")
 	}
 
 	t.Logf("impresoras encontradas: %d", len(impresoras))
@@ -54,16 +63,80 @@ func TestInterpretarCodigo(t *testing.T) {
 	}
 
 	casos := map[string]string{
-		"vacio":        "",
-		"sin prefijo":  "abc123",
-		"base64 rota":  "CC1.esto-no-es-base64-valido!!!",
-		"json roto":    "CC1.bm8tZXMtanNvbg",
-		"sin url":      "CC1.eyJjIjoiYWJjMTIzIn0",
+		"vacio":       "",
+		"sin prefijo": "abc123",
+		"base64 rota": "CC1.esto-no-es-base64-valido!!!",
+		"json roto":   "CC1.bm8tZXMtanNvbg",
+		"sin url":     "CC1.eyJjIjoiYWJjMTIzIn0",
 	}
 
 	for nombre, entrada := range casos {
 		if _, err := interpretarCodigo(entrada); err == nil {
 			t.Errorf("el caso %q tendria que haber fallado y no fallo", nombre)
 		}
+	}
+}
+
+// TestValidarApiURL cubre la guarda de seguridad del codigo de vinculacion: sin ella, un codigo
+// armado a mano apunta el agente a cualquier host y le hace imprimir lo que ese host devuelva.
+func TestValidarApiURL(t *testing.T) {
+	if err := ValidarApiURL("https://api-demo.comerciocity.com"); err != nil {
+		t.Errorf("una url valida fue rechazada: %v", err)
+	}
+
+	rechazables := map[string]string{
+		"http sin cifrar": "http://api-demo.comerciocity.com",
+		"sin host":        "https://",
+		"vacia":           "",
+		"otro esquema":    "file:///c:/algo",
+		"no es una url":   "no-es-una-url",
+	}
+
+	for nombre, entrada := range rechazables {
+		if err := ValidarApiURL(entrada); err == nil {
+			t.Errorf("el caso %q tendria que haber sido rechazado", nombre)
+		}
+	}
+}
+
+// TestInterpretarCodigoRechazaHttp confirma que la validacion de URL esta cableada al camino real
+// que usa el operador cuando pega un codigo.
+func TestInterpretarCodigoRechazaHttp(t *testing.T) {
+	// {"u":"http://malicioso.example","c":"abc123"}
+	malicioso := "CC1.eyJ1IjoiaHR0cDovL21hbGljaW9zby5leGFtcGxlIiwiYyI6ImFiYzEyMyJ9"
+
+	if _, err := interpretarCodigo(malicioso); err == nil {
+		t.Error("un codigo con http:// tendria que ser rechazado y no lo fue")
+	}
+}
+
+// TestEsperaHastaLaProximaVuelta cubre el backoff: sin el, con el servidor caido el agente pasa a
+// golpear cada 2 segundos justo cuando el hosting esta en problemas.
+func TestEsperaHastaLaProximaVuelta(t *testing.T) {
+	recien := time.Now()
+
+	if espera := esperaHastaLaProximaVuelta(recien, 0); espera != intervaloDeSondeo {
+		t.Errorf("sin errores y con trabajo reciente tendria que sondear cada %s, y da %s", intervaloDeSondeo, espera)
+	}
+
+	viejo := time.Now().Add(-10 * time.Minute)
+	if espera := esperaHastaLaProximaVuelta(viejo, 0); espera != intervaloEnReposo {
+		t.Errorf("en reposo tendria que esperar %s, y da %s", intervaloEnReposo, espera)
+	}
+
+	// Con errores, la espera tiene que CRECER y no quedarse en el intervalo normal.
+	unError := esperaHastaLaProximaVuelta(recien, 1)
+	variosErrores := esperaHastaLaProximaVuelta(recien, 5)
+
+	if unError <= intervaloDeSondeo {
+		t.Errorf("con un error la espera tendria que crecer, y da %s", unError)
+	}
+
+	if variosErrores <= unError {
+		t.Errorf("con mas errores la espera tendria que crecer mas: 1 error da %s y 5 dan %s", unError, variosErrores)
+	}
+
+	if techo := esperaHastaLaProximaVuelta(recien, 50); techo > intervaloMaximoConError {
+		t.Errorf("la espera supero el techo de %s: %s", intervaloMaximoConError, techo)
 	}
 }

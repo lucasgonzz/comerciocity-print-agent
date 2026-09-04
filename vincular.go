@@ -53,6 +53,11 @@ func interpretarCodigo(pegado string) (*codigoPegado, error) {
 		return nil, errors.New("el codigo esta incompleto. Generá uno nuevo desde el sistema")
 	}
 
+	// Guarda de seguridad, no de formato: ver ValidarApiURL.
+	if err := ValidarApiURL(codigo.ApiURL); err != nil {
+		return nil, err
+	}
+
 	return &codigo, nil
 }
 

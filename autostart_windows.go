@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -19,9 +20,9 @@ var (
 )
 
 const (
-	swHide                = 0
-	errorAlreadyExists    = 183
-	nombreDelEjecutable   = "ComercioCityPrint.exe"
+	swHide              = 0
+	errorAlreadyExists  = 183
+	nombreDelEjecutable = "ComercioCityPrint.exe"
 )
 
 // OcultarConsola esconde la ventana negra cuando el agente arranca solo con Windows.
@@ -37,28 +38,31 @@ func OcultarConsola() {
 	}
 }
 
-// YaHayOtraInstancia evita que el agente corra dos veces.
+// TomarMutexDeInstancia evita que el agente corra dos veces a la vez.
 //
-// Pasa facil: queda el de la carpeta de inicio corriendo y el operador vuelve a hacer doble clic
-// en el que bajo a Descargas. Con dos instancias sondeando, cada ticket sale una sola vez igual
-// (el servidor lo entrega una vez), pero se duplican los sondeos y el diagnostico se vuelve
-// confuso. El mutex es del sistema, asi que lo ve la otra instancia aunque sea otro archivo .exe.
-func YaHayOtraInstancia() bool {
-	nombre, err := syscall.UTF16PtrFromString(`Global\ComercioCityPrintAgent`)
+// 🔴 El alcance es `Local\` y no `Global\`, a proposito: la config vive en %APPDATA% y el arranque
+// automatico en la carpeta de inicio del usuario, o sea que TODO en este agente es por usuario de
+// Windows. Con `Global\`, en una caja con dos cuentas (turno mañana y turno tarde) el agente del
+// segundo usuario veria el mutex del primero, saldria sin decir nada, y esa sesion no imprimiria
+// nunca sin ningun mensaje que lo explique.
+//
+// Devuelve false si ya hay otra instancia de este usuario corriendo.
+func TomarMutexDeInstancia() bool {
+	nombre, err := syscall.UTF16PtrFromString(`Local\ComercioCityPrintAgent`)
 	if err != nil {
-		return false
+		return true
 	}
 
 	ret, _, err := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(nombre)))
 	if ret == 0 {
-		return false
-	}
-
-	if errno, ok := err.(syscall.Errno); ok && uintptr(errno) == errorAlreadyExists {
 		return true
 	}
 
-	return false
+	if errno, ok := err.(syscall.Errno); ok && uintptr(errno) == errorAlreadyExists {
+		return false
+	}
+
+	return true
 }
 
 // carpetaDeInicio es la carpeta Startup del usuario.
@@ -76,6 +80,32 @@ func carpetaDeInicio() (string, error) {
 	return filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup"), nil
 }
 
+// RutaInstalada es donde vive el agente una vez instalado.
+func RutaInstalada() (string, error) {
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		return "", errNoAppData
+	}
+
+	return filepath.Join(localAppData, "ComercioCityPrint", nombreDelEjecutable), nil
+}
+
+// EstoyCorriendoDesdeLaInstalacion dice si este proceso ES el agente instalado, y no una copia que
+// el operador ejecuto desde Descargas.
+func EstoyCorriendoDesdeLaInstalacion() bool {
+	origen, err := os.Executable()
+	if err != nil {
+		return false
+	}
+
+	destino, err := RutaInstalada()
+	if err != nil {
+		return false
+	}
+
+	return mismaRuta(origen, destino)
+}
+
 // InstalarEnElEquipo deja el agente corriendo solo cada vez que se prende la computadora.
 //
 // Se copia a dos lados: a una carpeta propia bajo el perfil del usuario (que es de donde va a
@@ -87,23 +117,20 @@ func InstalarEnElEquipo() (string, error) {
 		return "", err
 	}
 
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		return "", errNoAppData
-	}
-
-	carpetaDestino := filepath.Join(localAppData, "ComercioCityPrint")
-	if err := os.MkdirAll(carpetaDestino, 0700); err != nil {
+	destino, err := RutaInstalada()
+	if err != nil {
 		return "", err
 	}
 
-	destino := filepath.Join(carpetaDestino, nombreDelEjecutable)
+	if err := os.MkdirAll(filepath.Dir(destino), 0700); err != nil {
+		return "", err
+	}
 
 	// Si ya se esta ejecutando desde el destino, no tiene sentido copiarse sobre si mismo
 	// (Windows ademas tiene el archivo tomado y la copia falla).
 	if !mismaRuta(origen, destino) {
 		if err := copiarArchivo(origen, destino); err != nil {
-			return "", fmt.Errorf("no se pudo copiar el programa a %s: %v", carpetaDestino, err)
+			return "", fmt.Errorf("no se pudo copiar el programa a %s: %v", filepath.Dir(destino), err)
 		}
 	}
 
@@ -127,7 +154,11 @@ func InstalarEnElEquipo() (string, error) {
 	return destino, nil
 }
 
-// mismaRuta compara dos rutas sin que las diferencias de mayusculas o de forma cuenten.
+// mismaRuta compara dos rutas sin que las diferencias de mayusculas cuenten.
+//
+// En Windows `C:\Users\Caja\...` y `c:\users\caja\...` son el mismo archivo. Compararlas con `==`
+// da distinto y hace que el agente intente copiarse sobre si mismo, lo que Windows rechaza con
+// sharing violation: la instalacion falla por una razon inventada.
 func mismaRuta(a, b string) bool {
 	rutaA, errA := filepath.Abs(a)
 	rutaB, errB := filepath.Abs(b)
@@ -136,10 +167,16 @@ func mismaRuta(a, b string) bool {
 		return false
 	}
 
-	return len(rutaA) == len(rutaB) && filepath.Clean(rutaA) == filepath.Clean(rutaB)
+	return strings.EqualFold(filepath.Clean(rutaA), filepath.Clean(rutaB))
 }
 
-// copiarArchivo copia un archivo entero.
+// copiarArchivo copia un archivo entero, de forma atomica.
+//
+// 🔴 Escribe a un temporal y despues renombra, en vez de truncar el destino y copiar encima. Si la
+// copia muere a mitad -- disco lleno, un antivirus interceptando la escritura de un .exe en la
+// carpeta de inicio, que es JUSTO el patron que Defender vigila --, truncar dejaria un ejecutable
+// corrupto en el arranque de Windows, que en el proximo login tira "no es una aplicacion Win32
+// valida". Con temporal + rename, o queda el archivo entero o no queda nada.
 func copiarArchivo(origen, destino string) error {
 	entrada, err := os.Open(origen)
 	if err != nil {
@@ -147,15 +184,58 @@ func copiarArchivo(origen, destino string) error {
 	}
 	defer entrada.Close()
 
-	salida, err := os.OpenFile(destino, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0700)
+	temporal := destino + ".tmp"
+
+	salida, err := os.OpenFile(temporal, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0700)
 	if err != nil {
 		return err
 	}
-	defer salida.Close()
 
 	if _, err := io.Copy(salida, entrada); err != nil {
+		salida.Close()
+		os.Remove(temporal)
 		return err
 	}
 
-	return salida.Sync()
+	if err := salida.Sync(); err != nil {
+		salida.Close()
+		os.Remove(temporal)
+		return err
+	}
+
+	if err := salida.Close(); err != nil {
+		os.Remove(temporal)
+		return err
+	}
+
+	// En Windows, Rename sobre un archivo existente falla: hay que sacarlo primero. Si el destino
+	// esta tomado por un proceso corriendo, esto falla y el temporal se limpia.
+	os.Remove(destino)
+
+	if err := os.Rename(temporal, destino); err != nil {
+		os.Remove(temporal)
+		return err
+	}
+
+	return nil
+}
+
+// DesinstalarDelInicio saca el agente del arranque de Windows.
+//
+// Va de la mano de borrarConfig: si el equipo fue desvinculado desde el sistema, dejar el .exe en
+// la carpeta de inicio lo haria arrancar en cada login para siempre, sin ventana y sin nada que
+// hacer, salvo pedir un codigo nuevo.
+func DesinstalarDelInicio() error {
+	inicio, err := carpetaDeInicio()
+	if err != nil {
+		return err
+	}
+
+	enInicio := filepath.Join(inicio, nombreDelEjecutable)
+
+	if err := os.Remove(enInicio); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
 }

@@ -24,6 +24,14 @@ jobs:
         with:
           go-version: '1.21'
 
+      # Verificaciones antes de publicar. Sin esto, un release sale igual con codigo mal
+      # formateado o con lo que vet detecta -- y despues hay que actualizar 40 maquinas.
+      - name: Formato
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Vet
+        run: go vet ./...
+
       # Se compila para Windows desde Linux: los archivos _windows.go entran por GOOS y el
       # ejecutable no necesita nada instalado en la maquina del comercio.
       - name: Compilar
