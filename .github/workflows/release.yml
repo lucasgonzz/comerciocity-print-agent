@@ -29,8 +29,11 @@ jobs:
       - name: Formato
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
 
+      # 🔴 GOOS=windows tambien para vet. El runner es Linux, y sin eso los archivos
+      # *_windows.go quedan afuera por su sufijo: el paquete no compila y vet falla con
+      # "undefined" en todo lo que vive ahi (ImprimirRaw, OcultarConsola, el mutex).
       - name: Vet
-        run: go vet ./...
+        run: GOOS=windows go vet ./...
 
       # Se compila para Windows desde Linux: los archivos _windows.go entran por GOOS y el
       # ejecutable no necesita nada instalado en la maquina del comercio.
