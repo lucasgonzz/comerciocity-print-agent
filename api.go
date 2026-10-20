@@ -138,6 +138,10 @@ func mensajeDeError(cuerpo []byte, status int) error {
 		if payload.Message != "" {
 			return errors.New(payload.Message)
 		}
+	} else if status == 404 {
+		// Un 404 que no es JSON no lo contesto el sistema: es la pagina de error del hosting (HTML),
+		// o sea que la direccion del codigo no llega a ningun servicio de impresion.
+		return errors.New("no se encontro el servicio de impresion en esa direccion, avisa a soporte")
 	}
 
 	return fmt.Errorf("el servidor respondio %d", status)
